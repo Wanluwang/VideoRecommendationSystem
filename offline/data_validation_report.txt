@@ -1,0 +1,36 @@
+All clear for users: There are no columns with missing values!
+All clear for videos: There are no columns with missing values!
+All clear for interactions: There are no columns with missing values!
+There are no duplicated rows for users
+There are no duplicated rows for videos
+There are no duplicated rows for interactions
+There are 10000 in users.
+There are 10000 in videos.
+There are 100000 in interactions.
+invalid users: 0
+invalid videos: 0
+user age distribution: count    10000.000000
+mean        24.757600
+std          7.504017
+min         13.000000
+25%         19.000000
+50%         24.000000
+75%         30.000000
+max         56.000000
+Name: age, dtype: float64
+video_category_distribution: count      10000
+unique         8
+top       Travel
+freq        1311
+Name: category, dtype: object
+interaction_time_distribution: count    100000.000000
+mean         33.514605
+std          27.638707
+min           0.000371
+25%          11.479105
+50%          26.600224
+75%          49.265945
+max         153.100668
+Name: watch_time, dtype: float64
+like_rate: 0.09304
+share_rate: 0.02316
