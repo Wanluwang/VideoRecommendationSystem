@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import os
 import joblib
+from datetime import datetime
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.decomposition import TruncatedSVD
 from sklearn.preprocessing import OneHotEncoder
@@ -20,6 +21,27 @@ interactions_df = pd.read_csv(interactions_path)
 videos_df = pd.read_csv(videos_path)
 users_df = pd.read_csv(users_path)
 
+numeric_cols = [    'watch_time',
+                    'user_watch_time_mean', 
+                    'user_watch_time_std', 
+                    'user_total_view_count',
+                    'user_watch_time_sum',
+                    'user_watch_time_max',
+                    'user_liked_sum',
+                    'user_shared_sum',
+                    'user_recency_days_min',
+                    'user_user_avg_session_duration_seconds',
+                    'user_age',
+                    'user_account_age',
+                    'video_average_watch_time',
+                    'video_watch_time_std',
+                    'video_watch_time_count',
+                    'video_total_watch_time',
+                    'video_liked_sum',
+                    'video_shared_sum',
+                    'video_duration_sec',
+                    'video_view_count',
+                    'video_video_age_days']
 
 def get_day_period(hour):
     if 0 <= hour < 6: return 'night'
@@ -28,19 +50,20 @@ def get_day_period(hour):
     else: return 'evening'
     
 def create_temporal_features(df):
-    df['timestamp'] = pd.to_datetime(interactions_df['timestamp'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
     df['hour_of_day'] = df['timestamp'].dt.hour
     df['day_of_week'] = df['timestamp'].dt.dayofweek
     df['is_weekend'] = (df['day_of_week'] >= 5).astype(int)
     df['month'] = df['timestamp'].dt.month
     df['day_period'] = df['hour_of_day'].apply(get_day_period)
-    max_date = df['timestamp'].max()
+    max_date = datetime.now()
     df['recency_days'] = (max_date - df['timestamp']).dt.days
     #cyclic features (trigonometric encoding)
     df['hour_sin'] = np.sin(2*np.pi*df['hour_of_day']/24)
     df['hour_cos'] = np.cos(2*np.pi*df['hour_of_day']/24)
     df['dow_sin'] = np.sin(2*np.pi*df['day_of_week']/7)
     df['dow_cos'] = np.cos(2*np.pi*df['day_of_week']/7)
+    return df
     
 def create_sessionization_features(interactions_df):
     df = interactions_df.sort_values(['user_id', 'timestamp'])
@@ -77,7 +100,7 @@ def create_user_features(interactions_df, users_df, videos_df):
     user_stats['engagement_rate'] = (user_stats['liked_sum']+user_stats['shared_sum'])/user_stats['total_view_count']
     user_stats = user_stats.merge(session_stats, how='left', on='user_id')
     #User account features
-    max_date = interactions_df['timestamp'].max()
+    max_date = datetime.now()
     users_df['join_date'] = pd.to_datetime(users_df['join_date'])
     users_df['account_age'] = (max_date-users_df['join_date']).dt.days
     user_stats = user_stats.merge(users_df, how='right', on='user_id')
@@ -87,8 +110,8 @@ def create_user_features(interactions_df, users_df, videos_df):
     ).groupby('user_id')['category'].nunique()
     user_stats = user_stats.merge(user_category_diversity, how='left', on='user_id')
     user_stats.rename(columns={
-        'category': 'user_category_diversity',
-        }, inplace=True)
+        col: f"user_{col}" for col in user_stats.columns if col != 'user_id'
+    }, inplace=True)
     user_stats = user_stats.fillna(user_stats.mode().iloc[0])
     return user_stats
 
@@ -101,18 +124,20 @@ def create_video_features(interactions_df, videos_df):
     video_stats[('watch_time', 'std')] = video_stats[('watch_time', 'std')].fillna(0)
     video_stats.columns = ['_'.join(col) for col in video_stats.columns]
     video_stats.rename(columns={
-        'watch_time_count': 'view_count',
         'watch_time_sum': 'total_watch_time',
         'watch_time_mean': 'average_watch_time',
         'liked_mean': 'liked_rate',
         'shared_mean': 'shared_rate',
     }, inplace=True)
     video_stats['engagement_rate'] = video_stats['liked_rate']+video_stats['shared_rate']
-    max_date = interactions_df['timestamp'].max()
+    max_date = datetime.now()
     videos_df['upload_date'] = pd.to_datetime(videos_df['upload_date'])
     videos_df['video_age_days'] = (max_date-videos_df['upload_date']).dt.days
     video_stats = video_stats.merge(videos_df, on='video_id', how='right')
     video_stats = video_stats.fillna(video_stats.mode().iloc[0])
+    video_stats.rename(columns={
+            col: f"video_{col}" for col in video_stats.columns if col != 'video_id'
+        }, inplace=True)
     return video_stats
 
 from sklearn.decomposition import TruncatedSVD
@@ -136,20 +161,23 @@ def create_embeddings(interactions_df):
         for idx, video_id in enumerate(interaction_matrix.columns)
     }
     return user_embeddings, video_embeddings, user_to_idx, video_to_idx
-
+leakage_features = [
+    "video_liked_rate",
+    "video_liked_sum",
+    "video_engagement_rate",
+    "user_like_rate",
+    "user_liked_sum",
+    "user_engagement_rate",
+]
 from sklearn.preprocessing import MinMaxScaler
 def create_interaction_features(interactions_df, videos_df, users_df, user_embeddings, video_embeddings, user_to_idx, video_to_idx, encoder, scaler):
     df = interactions_df.merge(videos_df, how='left', on='video_id')
-    df['completion_rate'] = np.clip(df['watch_time']/df['duration_sec'], 0, 1)
-    #watch time normalization
-    df['watch_time_normalized'] = scaler.transform(df[['watch_time']])
+    df['completion_rate'] = np.clip(df['watch_time']/df['video_duration_sec'], 0, 1)
     df['hour_weekend_interaction'] = df['hour_of_day'] * df['is_weekend']
-    df['recent_engagement'] = df.sort_values(by=['timestamp']).groupby('user_id')['liked'].transform(
-        lambda x: x.rolling(window=5, min_periods=1).mean()
-    )
     df = df.merge(users_df, how='left', on= 'user_id')
+    df[numeric_cols] = scaler.transform(df[numeric_cols])
     df['category_match'] = (
-        df['preferred_category'] == df['category']
+        df['user_preferred_category'] == df['video_category']
     ).astype(int)
     svd_features = []
     for _, row in interactions_df.iterrows():
@@ -171,15 +199,20 @@ def create_interaction_features(interactions_df, videos_df, users_df, user_embed
     svd_df = pd.DataFrame(
         svd_features, columns=svd_columns, index=df.index
     )
-    categorical_cols = ['gender', 'category', 'preferred_category', 'day_period']
+    categorical_cols = ['user_gender', 'video_category', 'user_preferred_category', 'day_period']
     encoded = encoder.transform(df[categorical_cols])
     encoded_columns = encoder.get_feature_names_out(categorical_cols)
     encoded_df = pd.DataFrame(
         encoded, columns=encoded_columns, index=df.index
     )
     df.drop(columns=
-            ['liked', 'shared', 'user_id', 'video_id', 'timestamp', 'join_date', 'upload_date'] + categorical_cols
+            ['user_id', 'video_id', 'timestamp', 'user_join_date', 'video_upload_date', 'video_creator_id'] + categorical_cols
             ,inplace=True)
+    df.drop(columns=leakage_features, inplace=True)
+    if 'liked' in df.columns:
+        df.drop(columns='liked', inplace=True)
+    if 'shared' in df.columns:
+        df.drop(columns='shared', inplace=True)
     X = pd.concat([df, svd_df, encoded_df], axis=1)
     return X
 
@@ -188,25 +221,46 @@ def encode_feature(interactions_df, user_features, video_features):
     df = pd.merge(interactions_df, user_features, on='user_id', how='left')
     df = pd.merge(df, video_features, on='video_id', how='left')
     encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
-    categorical_cols = ['gender', 'category', 'preferred_category', 'day_period']
+    categorical_cols = ['user_gender', 'video_category', 'user_preferred_category', 'day_period']
     encoder.fit_transform(df[categorical_cols])
     return encoder
-def scale_feature(df):
+def scale_feature(df,videos_df, users_df):
+    df = df.merge(videos_df, on='video_id', how='left')
+    df = df.merge(users_df, on='user_id', how='left')
     scaler = MinMaxScaler()
-    scaler.fit_transform(df[['watch_time']])
+    scaler.fit_transform(df[numeric_cols])
     return scaler
 
 from sklearn.model_selection import train_test_split
-train_df, test_df, y_train, y_test = train_test_split(interactions_df, interactions_df['liked'], test_size=0.1, random_state=42)
-create_temporal_features(train_df)
+# Sort by time
+interactions_df = interactions_df.sort_values('timestamp')
+
+# Time split: first 64% training, 16% validation, 20% test
+train_size = int(len(interactions_df) * 0.64)
+val_size = int(len(interactions_df) * 0.16)
+
+train_df = interactions_df[:train_size]
+y_train = interactions_df['liked'][:train_size]
+val_df = interactions_df[train_size:train_size+val_size]
+y_val = interactions_df['liked'][train_size:train_size+val_size]
+test_df = interactions_df[train_size+val_size:]
+y_test = interactions_df['liked'][train_size+val_size:]
+
+train_df = create_temporal_features(train_df)
 user_features = create_user_features(train_df, users_df, videos_df)
 video_features = create_video_features(train_df, videos_df)
-user_embeddings, video_embeddings, user_to_idx, video_to_idx = create_embeddings(train_df)
+user_embeddings, video_embeddings, user_to_idx, video_to_idx = create_embeddings(interactions_df)
 encoder = encode_feature(train_df, user_features, video_features)
-scaler = scale_feature(train_df)
+scaler = scale_feature(train_df, video_features, user_features)
 X = create_interaction_features(train_df, video_features, user_features, user_embeddings, video_embeddings, user_to_idx, video_to_idx, encoder, scaler)
-create_temporal_features(test_df)
+
+val_df = create_temporal_features(val_df)
+X_val = create_interaction_features(val_df, video_features, user_features, user_embeddings, video_embeddings, user_to_idx, video_to_idx, encoder, scaler)
+
+
+test_df = create_temporal_features(test_df)
 X_test = create_interaction_features(test_df, video_features, user_features, user_embeddings, video_embeddings, user_to_idx, video_to_idx, encoder, scaler)
+
 import joblib
 joblib.dump(encoder, os.path.join(models_dir, 'encoders.pkl'))
 joblib.dump(scaler, os.path.join(models_dir, 'scalers.pkl'))
@@ -217,7 +271,12 @@ embeddings = {
     'video_to_idx': video_to_idx
 }
 joblib.dump(embeddings, os.path.join(models_dir, 'embeddings.pkl'))
-train_interactions = pd.concat([X, y_train.rename('liked')], axis=1)
-test_interactions = pd.concat([X_test, y_test.rename('liked')], axis=1)
-train_interactions.to_csv(os.path.join(data_dir, 'train_interactions.csv'))
-test_interactions.to_csv(os.path.join(data_dir, 'test_interactions.csv'))
+
+train_interactions = pd.concat([X.reset_index(drop=True), y_train.reset_index(drop=True).rename('liked')], axis=1)
+val_interactions = pd.concat([X_val.reset_index(drop=True), y_val.reset_index(drop=True).rename('liked')], axis=1)
+test_interactions = pd.concat([X_test.reset_index(drop=True), y_test.reset_index(drop=True).rename('liked')], axis=1)
+train_interactions.to_csv(os.path.join(data_dir, 'train_interactions.csv'), index=False)
+test_interactions.to_csv(os.path.join(data_dir, 'test_interactions.csv'), index=False)
+val_interactions.to_csv(os.path.join(data_dir, 'val_interactions.csv'), index=False)
+user_features.to_csv(os.path.join(data_dir, 'user_features.csv'), index=False)
+video_features.to_csv(os.path.join(data_dir, 'video_features.csv'), index=False)
